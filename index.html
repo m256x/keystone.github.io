@@ -1,0 +1,538 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Keystone</title>
+
+<style>
+    body {
+        margin: 0;
+        font-family: Inter, system-ui, -apple-system, sans-serif;
+        background: linear-gradient(180deg, #0b0f14 0%, #0d1117 100%);
+        color: #d6dbe1;
+        line-height: 1.7;
+    }
+
+    .container {
+        max-width: 880px;
+        margin: auto;
+        padding: 60px 20px;
+    }
+
+    h1 {
+        font-size: 2.0em;
+        font-weight: 600;
+        color: #f0f3f6;
+        margin-bottom: 12px;
+        letter-spacing: -0.5px;
+    }
+
+    h2 {
+        margin-top: 50px;
+        font-size: 1.8em;
+        color: #f0f3f6;
+        border-bottom: 1px solid #21262d;
+        padding-bottom: 8px;
+    }
+
+    p {
+        margin: 20px 0;
+        color: #c1c7cd;
+        font-size: 17px;
+    }
+
+    a {
+        color: #6cb6ff;
+        text-decoration: none;
+    }
+
+    a:hover {
+        text-decoration: underline;
+    }
+
+    .meta {
+        display: flex;
+        align-items: center;
+        gap: 20px;
+        color: #8b949e;
+        font-size: 0.85em;
+        margin-bottom: 25px;
+    }
+
+    .author {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
+
+    .author img {
+        width: 18px;
+        height: 18px;
+        border-radius: 50%;
+        opacity: 0.9;
+    }
+
+    .date {
+        opacity: 0.7;
+    }
+
+    .download {
+        display: inline-block;
+        margin: 10px 0 30px;
+        padding: 8px 14px;
+        background: #161b22;
+        border: 1px solid #30363d;
+        border-radius: 6px;
+        font-size: 0.85em;
+    }
+
+    .download:hover {
+        background: #1c2128;
+    }
+
+    .code-block {
+        background: #0d1218;
+        padding: 12px 14px;
+        border-radius: 6px;
+        border: 1px solid #1a222c;
+        overflow-x: auto;
+        font-family: "JetBrains Mono", monospace;
+        font-size: 0.82em;
+        line-height: 1.5;
+        color: #bfc7cf;
+        white-space: pre-wrap;
+        word-break: break-all;
+    }
+
+    ul {
+        padding-left: 18px;
+    }
+
+    li {
+        margin: 6px 0;
+    }
+
+    hr {
+        border: none;
+        border-top: 1px solid #21262d;
+        margin: 30px 0;
+    }
+</style>
+</head>
+
+<body>
+<div class="container">
+
+    <h1>Deobfuscation, Analysis & Reversal of Keystone</h1>
+
+    <div class="meta">
+        <div class="author">
+            <img src="https://cdn-icons-png.flaticon.com/512/149/149071.png">
+            <span>Kyro</span>
+        </div>
+        <div class="author">
+            <img src="https://cdn-icons-png.flaticon.com/512/149/149071.png">
+            <span>Brad</span>
+        </div>
+        <div class="date">April 17th 2026</div>
+    </div>
+
+    <a class="download" href="/writeup.rar">Download All Files</a>
+
+    <h2>Introduction</h2>
+    <p>
+        Me and Brad have decided to reverse engineer and analyze the Keystone loader. Keystone develops multiple scripts for Rust. The more known brands using it would be Reflex, Iconic, and Lethality, along with many other smaller ones.
+    </p>
+    <p>
+        Users consistently report zero bans while using these scripts, which immediately made us curious about how they achieve such strong evasion. What we found was a multi-stage loader chain that combines an HTA bootstrapper, server-side authentication, XOR-obfuscated payloads, manual mapping into a Windows system process, and a Razer-based virtual driver for mouse input.
+    </p>
+    <p>
+        This documentation is a complete technical breakdown of the cheat loader chain. It combines findings from two independent analyses to create a comprehensive view of how this cheat operates from start to finish.
+    </p>
+    <p>
+        This focuses on what the HTA does in practice, how the DLL stage behaves, how the encrypted module is retrieved and reconstructed, what the decrypted PE looks like, how the manual mapping stage works, what the named pipe check is doing, how the Razer-style driver path is used, how the mouse IOCTL path is structured, and what the best detection and investigation points are.
+    </p>
+
+    <h2>Table of Contents</h2>
+    <ul>
+        <li><a href="#hta">1. HTA File</a></li>
+        <li><a href="#auth">2. Loader DLL Authentication and Payload Download</a></li>
+        <li><a href="#xor">3. XOR Decryption Stage</a></li>
+        <li><a href="#pe">4. Decrypted PE Analysis</a></li>
+        <li><a href="#driver">5. Driver and Installation</a></li>
+        <li><a href="#injection">6. Injection and Manual Mapping</a></li>
+        <li><a href="#ioctl">7. IOCTL-Based Mouse Movement</a></li>
+        <li><a href="#summary">8. Summary</a></li>
+    </ul>
+
+    <h2 id="hta">1. HTA File</h2>
+    <p>
+        Upon download, you get an HTA file. It contains obfuscated code using Obfuscator.io. You can decrypt the strings using a hardcoded alphabet that is slightly similar to base64. The decrypted content is available at <a href="https://files.catbox.moe/noda1a.txt">https://files.catbox.moe/noda1a.txt</a>.
+    </p>
+    <p>
+        The HTA is essentially acting as a bootstrapper. Its job is to read internal runtime data, ensure elevation, download the next DLL stage, launch that DLL using rundll32, and interfere with specific processes as part of handoff. It is not a full loader on its own. It is there to bridge execution into the actual DLL stage.
+    </p>
+    <p>
+        The HTA reads its own file contents and extracts any data appended after the marker END!. The logic reads the file using Scripting.FileSystemObject, reads all contents, finds the last occurrence of END!, and returns everything after it as a trimmed string. An observed example is END!purge. This means the HTA file acts as both an executable script and an embedded config container. That avoids a separate config file and gives the operator an easy way to vary behavior between builds. The specific observed value purge later becomes part of the rundll32 command line as -brand purge. So the appended data is active execution input.
+    </p>
+    <div class="code-block">
+function readAppendedString() {
+    var fso = new ActiveXObject("Scripting.FileSystemObject");
+    var selfPath = location.href.substring(8);
+    var file = fso.OpenTextFile(selfPath, 1);
+    var contents = file.ReadAll();
+    file.Close();
+    var markerPos = contents.lastIndexOf("END!");
+    if (markerPos !== -1) {
+        return contents.substring(markerPos + 4).trim();
+    }
+    return "";
+}
+    </div>
+    <p>
+        The HTA contains elevation logic that checks whether it is running with the privileges it expects. If not, it relaunches itself using runas. The logic creates a Shell.Application object, gets the current script path, and calls ShellExecute with the runas verb. The execution flow on window load checks if elevated. If not, it elevates and closes the original instance. If yes, it continues to the download and execute function. Why elevation matters is that later process interaction is more reliable, driver-related activity expects admin rights, creating or installing device-related components is easier with elevation, and killing target processes is more reliable.
+    </p>
+    <div class="code-block">
+function isElevated() {
+    try {
+        var fso = new ActiveXObject("Scripting.FileSystemObject");
+        var testFile = "C:\\Windows\\System32\\test.txt";
+        var file = fso.CreateTextFile(testFile, true);
+        file.Close();
+        fso.DeleteFile(testFile);
+        return true;
+    } catch(e) {
+        return false;
+    }
+}
+
+function elevateSelf() {
+    var shellApp = new ActiveXObject("Shell.Application");
+    var selfPath = location.href.substring(8);
+    shellApp.ShellExecute(selfPath, "", "", "runas", 1);
+}
+
+window.onload = function() {
+    if (!isElevated()) {
+        elevateSelf();
+        window.close();
+        return;
+    }
+    downloadAndExecute();
+};
+    </div>
+    <p>
+        The HTA enumerates system drives and looks for the first removable drive where DriveType equals 1 (removable media). The detected drive is then used to build the drop path for the next-stage DLL as drive:\loader.dll. Possible explanations for this include operator preference for removable media staging, distribution through removable media, avoidance of the primary disk, or a weak environmental assumption that removable storage will exist.
+    </p>
+    <div class="code-block">
+function detectRemovableDrive() {
+    var fso = new ActiveXObject("Scripting.FileSystemObject");
+    var drives = new Enumerator(fso.Drives);
+    for (; !drives.atEnd(); drives.moveNext()) {
+        var drive = drives.item();
+        if (drive.DriveType === 1) {
+            return drive.DriveLetter + ":\\";
+        }
+    }
+    return "";
+}
+    </div>
+    <p>
+        The HTA downloads the next-stage DLL over HTTP and writes it directly to disk. It creates an MSXML2.XMLHTTP object, opens a synchronous GET request to the download URL, and sends it. If the status is not 200, it shows an error message. Then it creates an ADODB.Stream object, opens it in binary mode, writes the response body, saves to the DLL path with overwrite enabled, and closes the stream. This is a straightforward downloader design with no visible hash validation, signature verification, or meaningful integrity check at this stage beyond HTTP 200.
+    </p>
+    <div class="code-block">
+function downloadAndExecute() {
+    var drivePath = detectRemovableDrive();
+    var dllPath = drivePath + "loader.dll";
+    var xhr = new ActiveXObject("MSXML2.XMLHTTP");
+    xhr.open("GET", downloadUrl, false);
+    xhr.send();
+    if (xhr.status !== 200) {
+        alert("Download failed (HTTP " + xhr.status + ")");
+        return;
+    }
+    var stream = new ActiveXObject("ADODB.Stream");
+    stream.Open();
+    stream.Type = 1;
+    stream.Write(xhr.ResponseBody);
+    stream.SaveToFile(dllPath, 2);
+    stream.Close();
+}
+    </div>
+    <p>
+        The downloaded DLL is launched through rundll32.exe using a named export. The PowerShell command constructed is powershell.exe -NoProfile -WindowStyle Hidden -Command "Start-Process rundll32.exe -ArgumentList 'loader.dll,EntryPoint -brand purge' -Verb RunAs". This shows that the DLL exports EntryPoint, the appended config string becomes a command-line value, execution is wrapped through PowerShell, and PowerShell launches rundll32 with elevation. Why rundll32 is useful here is because it is a legitimate Windows binary, it provides a normal-looking DLL host path, it supports export-based execution, and it reduces the need for a custom EXE launcher.
+    </p>
+    <div class="code-block">
+var psCommand = "powershell.exe -NoProfile -WindowStyle Hidden -Command " +
+    "\"Start-Process rundll32.exe -ArgumentList '" +
+    dllPath +
+    ",EntryPoint -brand " +
+    appendedArg +
+    "' -Verb RunAs\"";
+shell.Run(psCommand, 0, false);
+WScript.Sleep(3000);
+shell.Run("taskkill /F /IM rundll32.exe", 0, false);
+shell.Run("taskkill /F /IM mpnotify.exe", 0, false);
+    </div>
+    <p>
+        After launch, the HTA explicitly executes taskkill /F /IM rundll32.exe and taskkill /F /IM mpnotify.exe. The second command is the more important one. mpnotify.exe is later used as the injection target, so killing it beforehand likely ensures the process is in a known state, clears a currently running instance, forces a clean respawn or creates a clean target window for injection, and avoids conflicts with an existing mapped copy. The rundll32 kill is more unusual but may be part of crude cleanup logic, instance timing behavior, or reducing visible leftover processes after handoff. This process behavior is a useful detection point because mshta.exe to powershell.exe to rundll32.exe to taskkill mpnotify.exe is not normal software behavior.
+    </p>
+
+    <h2 id="auth">2. Loader DLL Authentication and Payload Download</h2>
+    <p>
+        Upon logging in with a valid key, the cheat sends a request to 
+    </p>
+    <div class="code-block">
+        https://keystoneapi.com/api/loginkey/{key}/{hwid}
+    </div>
+    <p>
+        An exploit was found that allows resetting HWID to any key, which was used to get a session ID. If the key is valid, the response is a JSON object containing success true, a session string, the game name (Rust-Script), the reseller name, an expiry timestamp, and a version number.
+    </p>
+    <p>
+        Many big name script providers all use the same source code with just changed names. The brand names include Iconic, Oneclick, Reflex, Lethality, Purge, and Cheatvault.
+    </p>
+    <p>
+        Once the session ID is obtained, the loader goes to
+    </p>
+    <div class="code-block">
+        https://keystoneapi.com/api/downloadwithkey/{sessionid}/{hwid}
+    </div>
+    <p>
+        to get the cheat DLL. The returned blob is encrypted. The loader dumps it and gets the raw cheat binary with a fixed PE header
+    </p>
+    <p>
+        Observed endpoint patterns are
+    </p>
+    <div class="code-block">
+        <pr>
+        keystoneapi.com/api/downloadwithkey/{sessionid}/{hwid}
+        </pr>
+        <pr>
+        https://keystoneapi.com/api/loginkey/{key}/{hwid}
+        </pr>
+    </div>
+    <p>
+        A reponse would be:
+    </p>
+    <div class="code-block">
+{"success":true,"session":"48PeCRnqbHDowRr8lvmoz74p","game":"Rust-Script","reseller":"OneClick","expiry":1777050714,"version":"1.1"}
+    </div>
+    <p>
+        The important fields are success, session, game, reseller, expiry, and version. The operational meaning is that the loader submits key plus HWID, the server validates subscription and authorization, the server returns a session token, and the session token is then used in the next request. This gives the operator access control, hardware locking, versioning, and entitlement tracking. From a reversing perspective, the critical value is the session token because it unlocks payload delivery.
+    </p>
+
+    <h2 id="xor">3. XOR Decryption Stage</h2>
+    <p>
+        The streamed module is XOR encrypted with a hardcoded key. The recovered key is KeyStoneAPI_SecretKey2024!@#$%^&. Observed behavior shows XOR starts from byte 0, and once XOR is applied, the result is a valid PE immediately.
+    </p>
+    <div class="code-block">
+void xor_decode(unsigned char* data, size_t size, const char* key, size_t key_len)
+{
+    for (size_t i = 0; i < size; ++i)
+        data[i] ^= key[i % key_len];
+}
+    </div>
+    <p>
+        This is weak obfuscation, not real cryptographic protection. Why it still exists is that it stops the payload from looking like a PE in transit or on disk, defeats casual inspection, avoids trivial static detection if only the encrypted blob is seen, and keeps the payload from obviously exposing its headers until decoded. But once the key is known, the protection value is minimal.
+    </p>
+    <p>
+        Known hashes: Encrypted streamed module MD5 is 
+    </p>
+    <div class="code-block">
+        05A38102202750A3287D6778E784CB52
+    </div>
+    <p>
+        Decrypted or unXORed PE MD5 is
+    </p>
+    <div class="code-block">
+        D5BB8CFDF8C6E44D277068E1BE257BED
+    </div>
+    <p>
+        These hashes are worth preserving because they let another analyst validate that they are working from the same sample state.
+    </p>
+    <h2 id="pe">4. Decrypted PE Analysis</h2>
+    <p>
+        The unXORed module is where the more interesting technical design becomes visible. Observed properties include a 64-bit PE32+ DLL, relocations present, no standard import table, a single export, no normal Authenticode signature, and no TLS directory observed in the analyzed build. Sections present are .text, .rdata, .data, .pdata, .rsrc, and .reloc. The export is EntryPoint. The internal DLL name is final_inference.dll. This mismatch between the dropped name loader.dll and the internal name final_inference.dll suggests reused project or build naming, a leftover internal build artifact, or an intentional mismatch between deployment name and internal metadata.
+    </p>
+    <p>
+        One of the most important static properties of the decrypted DLL is that it does not have a conventional import table. That means no easy API list in PE headers, no normal IAT-based import inspection, and runtime resolution is mandatory. Recovered DLL name strings include ntdll.dll, kernel32.dll, user32.dll, winmm.dll, and win32u.dll. These strings are very likely used by the runtime resolver. The module probably finds module bases manually, parses export tables manually, and stores resolved function pointers in internal tables. The absence of imports is one of the clearest signs that the sample was deliberately built to reduce static visibility.
+    </p>
+    <p>
+    A recovered string is 
+    </p>
+    <div class="code-block">
+        \\.\pipe\MyDepPipe. 
+    </div>
+    <p>
+        This is one of the cleaner environment-validation artifacts in the sample. The observed behavior indicates this pipe is used as a dependency check to ensure the mapped module is being run through the intended loader environment rather than by direct analyst execution. The practical effect is that direct execution is more likely to fail, analysts need to recreate or emulate the loader state, and partial execution environments break more easily. This is not a strong protection by itself but it is a practical gate against lazy execution attempts.
+    </p>
+    <p>
+        Additional recovered strings include 
+    </p>
+    <div class="code-block">
+        panelhub.io
+    </div>
+    <p>
+        and
+    </p>
+    <div class="code-block">
+        /rust-script/dashboard
+    </div>
+    <p>
+        These strings are associated with the WebView2 menu and UI portion and are not central to the actual loader execution chain. They are likely part of an in-cheat UI or menu panel. This distinction matters because otherwise the execution flow can be misdocumented.
+    </p>
+
+    <h2 id="driver">5. Driver and Installation</h2>
+    <p>
+        The cheat uses Pnputil to add the driver via INF files. The commands executed are:
+    </p>
+    <div class="code-block">
+pnputil /add-driver rzcommonu.inf /install
+pnputil /add-driver rzdevu_0306_kbd.inf /install
+pnputil /add-driver rzdevu_0306_mou.inf /install
+pnputil /add-driver rzdevu_0306_vbus.inf /install
+pnputil /add-driver rzdevu_0306_vcon.inf /install
+pnputil /add-driver rzdevu_0306_vkbd.inf /install
+pnputil /add-driver rzdevu_0306_vmou.inf /install
+    </div>
+    <p>
+        It creates a virtual Razer device at 
+    </p>
+    <div class="code-block">
+        ROOT\RAZER_DEVICE
+    </div>
+    <p>
+       then proceeds to erase it via pnputil with the command 
+    </p>
+    <div class="code-block">
+        pnputil.exe /remove-device "ROOT\RAZER_DEVICE\0000" /subtree
+    </div>
+    <p>
+        It waits 500 milliseconds before proceeding. Once removal triggers, a virtual bus appears called
+    </p>
+    <div class="code-block">
+        RAZER\VirtualBus\VID_1532&PID_0306
+    </div>
+    <p>
+        Then it runs
+    </p>
+    <div class="code-block">
+        pnputil.exe /scan-devices
+    </div>
+    <p>
+        Every 2 seconds. The scan detects the virtual bus and reinstalls
+    </p>
+    <div class="code-block">
+        ROOT\RAZER_DEVICE
+    </div>
+    <p>
+        After which you are able to cheat.
+    </p>
+    <p>
+        Observed staging path is 
+    </p>
+    <div class="code-block">
+        C:\Windows\Temp\RazerDrivers
+    </div>
+    <p>
+        Referenced files include 
+    </p>
+    <div class="code-block">
+        rzdevu_0306_vbus.inf, rzcommonu.inf, and RzCommon.sys
+    </div>
+    <p>
+        An observed registry string
+    </p>
+    <div class="code-block">
+        SYSTEM\CurrentControlSet\Enum\ROOT\RAZER_DEVICE\
+    </div>
+    <p>
+        GUIDs present in related logic are
+    </p>
+    <div class="code-block">
+        RZCONTROL_GUID = {E3BE005D-D130-4910-88FF-09AE02F680E9}
+    </div>
+    <p>
+        and
+    </p>
+    <div class="code-block">
+        RAZER_GUID = {1750F915-5639-497C-966C-3A65ACECFCB6}.
+    </div>
+
+    <h2 id="injection">6. Injection and Manual Mapping</h2>
+    <p>
+        The cheat uses a manual mapping technique to inject the decrypted DLL into mpnotify.exe. Once mapped, the module resolves APIs dynamically at runtime, has no standard import table, wipes PE headers after mapping, unlinks itself from PEB loader lists, spoofs thread start information to look like RtlUserThreadStart, and validates the loader environment through the named pipe \\.\pipe\MyDepPipe.
+    </p>
+    <p>
+        The mapped module is injected into mpnotify.exe. This gives the loader a legitimate process name, a known Windows binary, and a believable host context. The earlier HTA stage killing mpnotify.exe strongly suggests that this target selection is deliberate and part of the chain rather than incidental.
+    </p>
+    <p>
+        The manual mapping process parses the DOS header and NT headers, reserves or commits memory for SizeOfImage, copies SizeOfHeaders, iterates through the section table, and copies raw section data to VirtualAddress-based layout. It applies relocations if the image is not loaded at the preferred image base by calculating the delta and walking through the relocation blocks to patch absolute addresses.
+    </p>
+    <p>
+        Because the DLL lacks a standard import table, API resolution follows a custom path that accesses the PEB, locates loaded modules, parses export directories, matches names or hashes, and stores resolved pointers internally.
+    </p>
+    <p>
+        After mapping, it wipes the PE headers by zeroing out the DOS header and NT headers. The practical effect is no MZ at the base and no PE signature in the expected header region, making memory scanners that rely on PE signatures less reliable.
+    </p>
+    <p>
+        It then unlinks the mapped module from the normal loader-linked module lists including InLoadOrderModuleList, InMemoryOrderModuleList, and InInitializationOrderModuleList. The practical effect is that normal module enumeration becomes less useful, many basic tools relying on the PEB miss the module, and visibility drops for simplistic detection logic.
+    </p>
+    <p>
+        Finally, it spoofs thread start information to make threads appear to start at RtlUserThreadStart. The observed behavior is all threads are spoofed to RtlUserThreadStart. The visible result is that thread start looks more normal during inspection, the real execution origin is less obvious, and call-stack review becomes noisier.
+    </p>
+
+    <h2 id="ioctl">7. IOCTL-Based Mouse Movement</h2>
+    <p>
+        This is the strongest concrete technical point in the entire chain because the actual movement packet-building logic is known. The observed function is:
+    </p>
+    <div class="code-block">
+void move(LONG x, LONG y)
+{
+    BYTE buf[32]{};
+    *(DWORD*)(buf + 4) = 2;
+    *(LONG*)(buf + 20) = x;
+    *(LONG*)(buf + 24) = y;
+    BOOL ok = device_control(device, 0x88883020, buf, 32, nullptr, 0, nullptr, nullptr);
+}
+    </div>
+    <p>
+        Communication uses DeviceIoControl, the input buffer is 32 bytes, the field at offset 4 is a type or operation field with value 2, the X delta is stored at offset 20, the Y delta is stored at offset 24, and movement goes through the device handle, not normal Win32 input APIs.
+    </p>
+    <p>
+        Based on the observed writes, a minimal structure can be reconstructed as unknown bytes at offset 0 (4 bytes), a uint32_t type at offset 4 with value 2, unknown bytes at offset 8 (12 bytes), an int32_t x at offset 20, an int32_t y at offset 24, and unknown bytes at offset 28 (8 bytes). Total size is 32 bytes.
+    </p>
+    <p>
+        The observed IOCTL is 0x88883020. This value is important because it is one of the best concrete driver-side indicators for debugging, ProcMon or trace work, handle monitoring, and detection engineering.
+    </p>
+    <p>
+        Using DeviceIoControl against a virtual device or driver path instead of SendInput, mouse_event, or window messages means that user-mode input hooks are less useful, basic anti-cheat telemetry on Win32 APIs is bypassed, the movement appears lower in the stack, and input can look more like device-originated movement. In practical terms, the HTA, XOR, and manual mapping make the loader harder to inspect. The driver path is what makes it harder to detect through normal input monitoring.
+    </p>
+
+    <h2 id="summary">8. Summary</h2>
+    <p>
+        This loader is best understood as a staged cheat delivery framework with five major phases.
+    </p>
+    <p>
+        Phase 1 is HTA bootstrap. This involves a hidden or minimized HTA, self-read config through END!, UAC relaunch, removable drive detection, DLL download, and execution handoff through PowerShell to rundll32.
+    </p>
+    <p>
+        Phase 2 is the loader DLL. This involves key and HWID authentication, session token retrieval, and encrypted module download from the keystoneapi server.
+    </p>
+    <p>
+        Phase 3 is payload reconstruction. This involves XOR decode from byte 0 using the hardcoded key, resulting in a valid PE reconstruction.
+    </p>
+    <p>
+        Phase 4 is stealthy execution. This involves manual map into mpnotify.exe, dynamic API resolution, PE header wipe, PEB unlink, thread-start spoofing to RtlUserThreadStart, and named pipe dependency check.
+    </p>
+    <p>
+        Phase 5 is driver-backed input. This involves Razer 0306-style virtual device path, staged driver files in temp, pnputil device installation and removal, virtual bus creation, device communication through IOCTL 0x88883020, and mouse movement through the driver or device path instead of user-mode APIs.
+    </p>
+    <p>
+        The single most important operational point is the driver-backed input path. The earlier stages help protect delivery and execution, but the driver path is what gives the cheat its strongest anti-cheat advantage.
+    </p>
+
+</div>
+</body>
+</html>
